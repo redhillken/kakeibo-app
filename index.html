@@ -62,6 +62,14 @@ button{border:0;border-radius:13px;padding:12px 14px;font-weight:700;min-height:
 .hidden{display:none}
 dialog{border:0;border-radius:18px;width:calc(100% - 24px);max-width:650px;padding:0}
 dialog::backdrop{background:rgba(0,0,0,.35)}
+dialog .card{max-height:calc(100vh - 40px);overflow-y:auto}
+.be-row{padding:8px 0;border-bottom:1px solid var(--line)}
+.be-line{display:grid;grid-template-columns:1fr 110px 64px;gap:6px;align-items:center}
+.be-line input{padding:10px}
+.be-line button{min-height:40px;padding:6px;font-size:13px}
+.be-row.deleted .be-name,.be-row.deleted .be-amt{text-decoration:line-through;opacity:.45}
+.be-move{margin-top:6px;font-size:12px}
+.nobudget{color:var(--warn);font-size:11px;font-weight:600}
 </style>
 </head>
 <body>
@@ -176,8 +184,20 @@ dialog::backdrop{background:rgba(0,0,0,.35)}
 
 <dialog id="budgetDialog">
  <div class="card" style="margin:0;border:0">
-  <h2>月予算を編集</h2>
+  <h2>月予算を編集 <span class="sub" id="budgetDialogMonth"></span></h2>
+  <div class="sub" style="margin-bottom:6px">カテゴリー名・金額はそのまま書き換えられます。「削除」で外したカテゴリーの記録は移動先を選べます。</div>
   <div id="budgetEditor"></div>
+  <div style="background:#f8f9fb;border-radius:14px;padding:10px;margin-top:10px">
+   <label>カテゴリーを追加</label>
+   <div class="be-line" style="grid-template-columns:1fr 110px 64px">
+    <input id="newCatName" placeholder="例：車">
+    <input id="newCatAmount" type="number" inputmode="numeric" placeholder="予算額">
+    <button class="primary" id="addCatBtn" type="button">追加</button>
+   </div>
+  </div>
+  <label style="display:flex;gap:8px;align-items:center;font-size:14px;color:var(--text);margin-top:12px">
+   <input type="checkbox" id="applyForward" checked style="width:auto;margin:0"> この月以降の月にも同じ予算を反映（来月以降の初期予算にもなります）
+  </label>
   <div class="grid" style="margin-top:12px">
    <div><label>資産形成</label><input id="investmentBudget" type="number"></div>
    <div><label>月収目安</label><input id="incomeBudget" type="number"></div>
@@ -198,8 +218,8 @@ const firebaseApp=initializeApp(firebaseConfig),auth=getAuth(firebaseApp),db=get
 let currentUser=null,cloudReady=false,applyingCloud=false,unsub=null,syncTimer=null;
 const DEFAULT_BUDGETS={
 "スーパー・食費":20000,"コンビニ":5000,"外食":10000,"彼女との交際費":30000,
-"衣服・Amazon等":10000,"娯楽":10000,"Suica・交通":10000,"ETC":0,
-"通信・ネット":5500,"サブスク":2400,"光熱水費":10000,"保険":3000,"その他":4100};
+"衣服・Amazon等":10000,"娯楽":10000,"Suica・交通":10000,"車":0,
+"通信・ネット":5500,"サブスク":2400,"光熱水費":10000,"保険":3000,"雑費":0,"その他":4100};
 const KEY="iphone_kakeibo_v2";
 let data=JSON.parse(localStorage.getItem(KEY)||'null')||{months:{}};
 let pendingReceipt=null;
@@ -213,10 +233,16 @@ function localToday(){
  return `${y}-${m}-${day}`;
 }
 function monthNow(){return localToday().slice(0,7)}
+// 新しい月の初期予算：①予算編集で保存したテンプレート ②直前の月の予算 ③既定値 の順
+function baseBudgets(ym){
+ if(data.budgetTemplate&&Object.keys(data.budgetTemplate).length) return {...data.budgetTemplate};
+ const prev=Object.keys(data.months||{}).filter(k=>k<ym&&data.months[k]?.budgets).sort().pop();
+ return prev?{...data.months[prev].budgets}:{...DEFAULT_BUDGETS};
+}
 function ensureMonth(ym){
- if(!data.months[ym]) data.months[ym]={budgets:{...DEFAULT_BUDGETS},investment:35000,income:200000,transactions:[],incomes:[]};
+ if(!data.months[ym]) data.months[ym]={budgets:baseBudgets(ym),investment:35000,income:200000,transactions:[],incomes:[]};
  const m=data.months[ym];
- if(!m.budgets) m.budgets={...DEFAULT_BUDGETS};
+ if(!m.budgets) m.budgets=baseBudgets(ym);
  if(!Array.isArray(m.transactions)) m.transactions=[];
  if(!Array.isArray(m.incomes)) m.incomes=[];
  if(typeof m.investment!=="number") m.investment=35000;
@@ -264,10 +290,14 @@ function render(){
  $("cashFlowTotal").style.color=it-st<0?"var(--bad)":"var(--good)";
  $("incomePlanTotal").textContent=yen(m.income||0);
  $("remainingTotal").style.color=bt-st<0?"var(--bad)":st/bt>.8?"var(--warn)":"var(--good)";
+ const prevCat=$("categoryInput").value;
  $("categoryInput").innerHTML=Object.keys(m.budgets).map(c=>`<option>${esc(c)}</option>`).join("");
- $("budgetList").innerHTML=Object.entries(m.budgets).map(([c,b])=>{
-  const s=spentBy[c]||0,r=b-s,p=b>0?Math.min(100,Math.round(s/b*100)):(s>0?100:0);
-  return `<div class="budget"><div class="budget-top"><div class="budget-name">${esc(c)}</div>
+ if(prevCat&&m.budgets[prevCat]!==undefined) $("categoryInput").value=prevCat;
+ // 予算から外したカテゴリーに記録が残っている場合も、消さずに「予算なし」として表示
+ const rows=Object.entries(m.budgets).concat(Object.keys(spentBy).filter(c=>m.budgets[c]===undefined).map(c=>[c,null]));
+ $("budgetList").innerHTML=rows.map(([c,b0])=>{
+  const b=Number(b0)||0,s=spentBy[c]||0,r=b-s,p=b>0?Math.min(100,Math.round(s/b*100)):(s>0?100:0);
+  return `<div class="budget"><div class="budget-top"><div class="budget-name">${esc(c)}${b0===null?' <span class="nobudget">予算なし</span>':''}</div>
   <div class="budget-numbers">使用 ${yen(s)} / ${yen(b)}<br><b style="color:${r<0?'var(--bad)':'inherit'}">残り ${yen(r)}</b></div></div>
   <div class="progress"><div style="width:${p}%;background:${r<0?'var(--bad)':p>=80?'var(--warn)':'var(--accent)'}"></div></div></div>`;
  }).join("");
@@ -316,9 +346,88 @@ $("addIncomeBtn").onclick=()=>{
  render();
  navigator.vibrate?.(30);
 }
-$("editBudgetBtn").onclick=()=>{let m=ensureMonth($("monthPicker").value);$("budgetEditor").innerHTML=Object.entries(m.budgets).map(([c,v])=>`<div class="grid" style="margin-bottom:8px"><div><label>${esc(c)}</label></div><div><input class="be" data-c="${esc(c)}" type="number" value="${v}"></div></div>`).join("");$("investmentBudget").value=m.investment;$("incomeBudget").value=m.income;$("budgetDialog").showModal()}
+// ===== 予算カテゴリーの編集（追加・名前変更・削除・記録の移動） =====
+function affectedMonths(ym,forward){return forward?Object.keys(data.months).filter(k=>k>=ym).sort():[ym]}
+function txCount(cat,months){return months.reduce((n,k)=>n+(data.months[k]?.transactions||[]).filter(t=>t.category===cat).length,0)}
+function beRowHtml(orig,name,amount){
+ return `<div class="be-row" data-orig="${esc(orig)}">
+  <div class="be-line"><input class="be-name" value="${esc(name)}"><input class="be-amt" type="number" inputmode="numeric" value="${Number(amount)||0}">
+  <button class="danger be-del" type="button">削除</button></div>
+  <div class="be-move hidden"></div></div>`;
+}
+function liveNames(){return [...document.querySelectorAll(".be-row:not(.deleted) .be-name")].map(x=>x.value.trim()).filter(Boolean)}
+function refreshMoveTargets(){
+ const ym=$("monthPicker").value,months=affectedMonths(ym,$("applyForward").checked),names=liveNames();
+ document.querySelectorAll(".be-row").forEach(row=>{
+  const box=row.querySelector(".be-move"),orig=row.dataset.orig;
+  const n=row.classList.contains("deleted")&&orig?txCount(orig,months):0;
+  if(!n){box.classList.add("hidden");box.innerHTML="";return}
+  const cur=box.querySelector("select")?.value||"";
+  box.classList.remove("hidden");
+  box.innerHTML=`「${esc(orig)}」の記録 ${n}件 の移動先：<select class="be-target" style="padding:8px;margin-top:4px">
+   <option value="">移動しない（「予算なし」として残す）</option>${names.map(c=>`<option ${c===cur?"selected":""}>${esc(c)}</option>`).join("")}</select>`;
+ });
+}
+$("editBudgetBtn").onclick=()=>{
+ const ym=$("monthPicker").value,m=ensureMonth(ym);
+ $("budgetDialogMonth").textContent=ym.replace("-","年")+"月";
+ $("budgetEditor").innerHTML=Object.entries(m.budgets).map(([c,v])=>beRowHtml(c,c,v)).join("");
+ $("newCatName").value="";$("newCatAmount").value="";$("applyForward").checked=true;
+ $("investmentBudget").value=m.investment;$("incomeBudget").value=m.income;$("budgetDialog").showModal();
+};
+$("budgetEditor").addEventListener("click",e=>{
+ const b=e.target.closest(".be-del");if(!b)return;
+ const row=b.closest(".be-row");
+ if(!row.dataset.orig){row.remove();refreshMoveTargets();return} // 追加したばかりの行はそのまま消す
+ const del=row.classList.toggle("deleted");
+ row.querySelectorAll("input").forEach(x=>x.disabled=del);
+ b.textContent=del?"戻す":"削除";b.className=del?"secondary be-del":"danger be-del";
+ refreshMoveTargets();
+});
+$("budgetEditor").addEventListener("change",e=>{if(e.target.classList.contains("be-name"))refreshMoveTargets()});
+$("applyForward").onchange=refreshMoveTargets;
+$("addCatBtn").onclick=()=>{
+ const name=$("newCatName").value.trim();
+ if(!name){alert("カテゴリー名を入力してください");return}
+ if(liveNames().includes(name)){alert("同じ名前のカテゴリーがすでにあります");return}
+ const deletedSame=[...document.querySelectorAll(".be-row.deleted")].find(r=>r.dataset.orig===name);
+ if(deletedSame){deletedSame.querySelector(".be-del").click();deletedSame.querySelector(".be-amt").value=Number($("newCatAmount").value)||0}
+ else $("budgetEditor").insertAdjacentHTML("beforeend",beRowHtml("",name,$("newCatAmount").value));
+ $("newCatName").value="";$("newCatAmount").value="";refreshMoveTargets();
+};
 $("cancelBudgetBtn").onclick=()=>$("budgetDialog").close();
-$("saveBudgetBtn").onclick=()=>{let m=ensureMonth($("monthPicker").value);document.querySelectorAll(".be").forEach(x=>m.budgets[x.dataset.c]=Number(x.value)||0);m.investment=Number($("investmentBudget").value)||0;m.income=Number($("incomeBudget").value)||0;$("budgetDialog").close();render()}
+$("saveBudgetBtn").onclick=()=>{
+ const ym=$("monthPicker").value,forward=$("applyForward").checked,m=ensureMonth(ym);
+ const newBudgets={},renames={},moves={},added=[],removed=[];
+ for(const row of document.querySelectorAll(".be-row")){
+  const orig=row.dataset.orig;
+  if(row.classList.contains("deleted")){removed.push(orig);const t=row.querySelector(".be-target")?.value;if(t)moves[orig]=t;continue}
+  const name=row.querySelector(".be-name").value.trim();
+  if(!name){alert("カテゴリー名が空の行があります");return}
+  if(newBudgets[name]!==undefined){alert(`「${name}」が重複しています`);return}
+  newBudgets[name]=Number(row.querySelector(".be-amt").value)||0;
+  if(!orig)added.push(name);else if(orig!==name)renames[orig]=name;
+ }
+ if(!Object.keys(newBudgets).length){alert("カテゴリーを1つ以上残してください");return}
+ const months=affectedMonths(ym,forward);
+ const changed=added.length||removed.length||Object.keys(renames).length;
+ if(changed){
+  const lines=[];
+  if(added.length)lines.push("追加："+added.join("、"));
+  if(removed.length)lines.push("削除："+removed.map(c=>moves[c]?`${c}（記録→${moves[c]}）`:c).join("、"));
+  if(Object.keys(renames).length)lines.push("名前変更："+Object.entries(renames).map(([a,b])=>`${a}→${b}`).join("、"));
+  lines.push(`反映する月：${months.join("、")}`+(forward?"＋今後の新しい月":""));
+  if(!confirm("予算カテゴリーを変更します。\n\n"+lines.join("\n")+"\n\n※記録そのものは削除されません。\n念のため先に「バックアップ」を取っておくと安心です。"))return;
+ }
+ for(const k of months){
+  const mm=ensureMonth(k);
+  mm.transactions.forEach(t=>{if(renames[t.category])t.category=renames[t.category];else if(moves[t.category])t.category=moves[t.category]});
+  if(k===ym||forward)mm.budgets={...newBudgets};
+ }
+ if(forward)data.budgetTemplate={...newBudgets};
+ m.investment=Number($("investmentBudget").value)||0;m.income=Number($("incomeBudget").value)||0;
+ $("budgetDialog").close();render();
+}
 $("monthPicker").onchange=()=>{$("dateInput").value=$("monthPicker").value+"-01";$("incomeDateInput").value=$("monthPicker").value+"-01";render()}
 function dl(blob,name){const a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(a.href),500)}
 $("exportCsvBtn").onclick=()=>{let m=ensureMonth($("monthPicker").value);let rows=[["種別","日付","カテゴリー","内容","金額","支払・受取方法","メモ"],...m.transactions.map(t=>["支出",t.date,t.category,t.merchant,t.amount,t.payment,t.memo]),...m.incomes.map(t=>["収入",t.date,t.category,t.source,t.amount,t.method,t.memo])];rows=rows.slice(0,1).concat(rows.slice(1).sort((a,b)=>a[1].localeCompare(b[1])));let csv=rows.map(r=>r.map(v=>`"${String(v??"").replace(/"/g,'""')}"`).join(",")).join("\n");dl(new Blob(["\ufeff"+csv],{type:"text/csv"}),`家計簿_${$("monthPicker").value}.csv`)}
