@@ -239,6 +239,13 @@ function baseBudgets(ym){
  const prev=Object.keys(data.months||{}).filter(k=>k<ym&&data.months[k]?.budgets).sort().pop();
  return prev?{...data.months[prev].budgets}:{...DEFAULT_BUDGETS};
 }
+// 予算の高い順に並べる（Firebaseは項目の順番を保存しないため、表示時に毎回並べ直す）
+// 同額の場合は既定の並び順→名前順で固定
+const DEFAULT_ORDER=Object.keys(DEFAULT_BUDGETS);
+function sortedBudgetEntries(budgets){
+ const idx=c=>{const i=DEFAULT_ORDER.indexOf(c);return i<0?999:i};
+ return Object.entries(budgets||{}).sort((a,b)=>(Number(b[1])||0)-(Number(a[1])||0)||idx(a[0])-idx(b[0])||a[0].localeCompare(b[0],"ja"));
+}
 function ensureMonth(ym){
  if(!data.months[ym]) data.months[ym]={budgets:baseBudgets(ym),investment:35000,income:200000,transactions:[],incomes:[]};
  const m=data.months[ym];
@@ -291,10 +298,10 @@ function render(){
  $("incomePlanTotal").textContent=yen(m.income||0);
  $("remainingTotal").style.color=bt-st<0?"var(--bad)":st/bt>.8?"var(--warn)":"var(--good)";
  const prevCat=$("categoryInput").value;
- $("categoryInput").innerHTML=Object.keys(m.budgets).map(c=>`<option>${esc(c)}</option>`).join("");
+ $("categoryInput").innerHTML=sortedBudgetEntries(m.budgets).map(([c])=>`<option>${esc(c)}</option>`).join("");
  if(prevCat&&m.budgets[prevCat]!==undefined) $("categoryInput").value=prevCat;
  // 予算から外したカテゴリーに記録が残っている場合も、消さずに「予算なし」として表示
- const rows=Object.entries(m.budgets).concat(Object.keys(spentBy).filter(c=>m.budgets[c]===undefined).map(c=>[c,null]));
+ const rows=sortedBudgetEntries(m.budgets).concat(Object.keys(spentBy).filter(c=>m.budgets[c]===undefined).map(c=>[c,null]));
  $("budgetList").innerHTML=rows.map(([c,b0])=>{
   const b=Number(b0)||0,s=spentBy[c]||0,r=b-s,p=b>0?Math.min(100,Math.round(s/b*100)):(s>0?100:0);
   return `<div class="budget"><div class="budget-top"><div class="budget-name">${esc(c)}${b0===null?' <span class="nobudget">予算なし</span>':''}</div>
@@ -371,7 +378,7 @@ function refreshMoveTargets(){
 $("editBudgetBtn").onclick=()=>{
  const ym=$("monthPicker").value,m=ensureMonth(ym);
  $("budgetDialogMonth").textContent=ym.replace("-","年")+"月";
- $("budgetEditor").innerHTML=Object.entries(m.budgets).map(([c,v])=>beRowHtml(c,c,v)).join("");
+ $("budgetEditor").innerHTML=sortedBudgetEntries(m.budgets).map(([c,v])=>beRowHtml(c,c,v)).join("");
  $("newCatName").value="";$("newCatAmount").value="";$("applyForward").checked=true;
  $("investmentBudget").value=m.investment;$("incomeBudget").value=m.income;$("budgetDialog").showModal();
 };
